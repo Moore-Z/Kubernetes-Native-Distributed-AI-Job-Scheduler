@@ -1,0 +1,13 @@
+apiVersion: ai.ruijie.io/v1
+kind: LLMService
+metadata:
+  labels:
+    app.kubernetes.io/name: kubeinfer
+    app.kubernetes.io/managed-by: kustomize
+  name: test-cache-llm
+spec:
+  model: "facebook/opt-125m"
+  replicas: 3
+  gpuMemory: "2Gi"
+  cacheStrategy: "shared" # 启用shared cache
+  image: "vllm/vllm-openai:latest"

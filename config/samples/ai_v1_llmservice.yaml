@@ -1,0 +1,22 @@
+# apiVersion: ai.ruijie.io/v1
+# kind: LLMService
+# metadata:
+#   labels:
+#     app.kubernetes.io/name: kubeinfer
+#     app.kubernetes.io/managed-by: kustomize
+#   name: llmservice-sample
+# spec:
+# TODO(user): Add fields here
+
+apiVersion: ai.ruijie.io/v1
+kind: LLMService
+metadata:
+  labels:
+    app.kubernetes.io/name: kubeinfer
+    app.kubernetes.io/managed-by: kustomize
+  name: my-first-llm
+spec:
+  # 这里是我们定义的字段
+  model: "facebook/opt-125m" # 用个小模型测试
+  replicas: 1
+  gpuMemory: "2Gi"

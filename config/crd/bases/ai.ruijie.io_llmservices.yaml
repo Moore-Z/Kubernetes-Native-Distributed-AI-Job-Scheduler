@@ -1,0 +1,111 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: llmservices.ai.ruijie.io
+spec:
+  group: ai.ruijie.io
+  names:
+    kind: LLMService
+    listKind: LLMServiceList
+    plural: llmservices
+    singular: llmservice
+  scope: Namespaced
+  versions:
+  - name: v1
+    schema:
+      openAPIV3Schema:
+        description: LLMService is the Schema for the llmservices API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired state of LLMService
+            properties:
+              cacheStrategy:
+                default: none
+                enum:
+                - none
+                - shared
+                type: string
+              gpuMemory:
+                description: GPUMemory requirement, e.g. "24Gi". Used for scheduling.
+                pattern: ^\d+(Gi|Mi)$
+                type: string
+              gpuPerReplica:
+                default: 0
+                format: int32
+                minimum: 0
+                type: integer
+              image:
+                default: vllm/vllm-openai:latest
+                type: string
+              model:
+                description: Model is the HuggingFace model ID, e.g., "deepseek-ai/deepseek-r1"
+                type: string
+              replicas:
+                default: 1
+                description: Replicas is the number of vLLM pods to run
+                format: int32
+                minimum: 1
+                type: integer
+            required:
+            - model
+            type: object
+          status:
+            description: status defines the observed state of LLMService
+            properties:
+              availableReplicas:
+                description: AvailableReplicas is the number of pods currently running
+                  and ready
+                format: int32
+                type: integer
+              cacheCoordinator:
+                type: string
+              conditions:
+                items:
+                  properties:
+                    lastUpdateTime:
+                      format: date-time
+                      type: string
+                    message:
+                      type: string
+                    reason:
+                      type: string
+                    status:
+                      type: string
+                    type:
+                      type: string
+                  required:
+                  - lastUpdateTime
+                  - status
+                  - type
+                  type: object
+                type: array
+            required:
+            - availableReplicas
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
