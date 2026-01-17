@@ -14,6 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	aiv1 "github.com/Moore-Z/kubeinfer/api/v1"
+	"github.com/Moore-Z/kubeinfer/pkg/metrics"
 )
 
 func (r *LLMServiceReconciler) ensureCacheCoordinator(
@@ -92,7 +93,7 @@ func (r *LLMServiceReconciler) createCoordinatorConfigMap(
 	// Go语法：== nil 检查指针是否为空
 	if coordinatorPod == nil {
 		log.Info("No ready Pod yet, will retry later")
-		return fmt.Errorf("no ready pods available for coordinator election")
+		return nil
 	}
 	// ========================================
 	// 步骤4：构造ConfigMap对象
@@ -200,8 +201,8 @@ func (r *LLMServiceReconciler) getPodsForLLMService(
 
 func (r *LLMServiceReconciler) electCoordinator(
 	ctx context.Context,
-	llm *aiv1.LLMService,
-	cm *corev1.ConfigMap) error {
+	llm *aiv1.LLMService,						// 要选举 coordinator 的 LLMService
+	cm *corev1.ConfigMap) error {		// 用来存储 coordinator 信息的 ConfigMap
 	log := log.FromContext(ctx)
 	// ========================================
 	// 步骤1：获取所有Pods
@@ -215,6 +216,12 @@ func (r *LLMServiceReconciler) electCoordinator(
 	// ========================================
 	// 为什么选最早的？因为它最可能已经下载好了模型
 
+	// 2. 从所有 Pods 中选出最早创建的 Ready Pod 作为 coordinator
+	//
+	// 选举策略（为什么选最早的）：
+	// - 稳定性：老 Pod 更不容易频繁重启
+	// - 简单性：不需要复杂的选举算法
+	// - 确定性：结果是确定的，不会有争议
 	var coordinator *corev1.Pod
 	for i := range pods.Items {
 		if r.isPodReady(&pods.Items[i]) {
@@ -230,6 +237,54 @@ func (r *LLMServiceReconciler) electCoordinator(
 		log.Info("No ready pods available for coordinator election")
 		return nil
 	}
+
+/*
+	// ========== Day 4-5 新增：记录选举事件 ==========
+
+	// 每次成功选出 Coordinator 时，计数器加 1
+	//
+	// 为什么在这里记录？
+	// - 因为上面已经确认找到了合适的 coordinator
+	// - 马上就要更新 ConfigMap，可以认为选举成功了
+	//
+	// 这个指标的意义（非常重要！）：
+	//
+	// 正常情况：
+	// - 每个 LLMService 启动时选举 1 次
+	// - 之后除非 coordinator Pod 挂了，否则不会再选举
+	// - 所以这个计数器增长非常缓慢
+	//
+	// 异常情况（需要告警）：
+	// - 如果频繁选举（例如每分钟多次）
+	// - 说明 coordinator Pod 不稳定，经常挂掉
+	// - 可能的原因：
+	//   → 资源不足（OOM、CPU throttle）
+	//   → vLLM 进程崩溃
+	//   → 节点不稳定
+	//   → 网络问题导致健康检查失败
+	//
+	// 监控告警配置示例（Prometheus PromQL）：
+	//
+	//   # 检测 5 分钟内选举次数
+	//   rate(kubeinfer_coordinator_elections_total[5m]) > 0.1
+	//
+	//   # 解释：
+	//   # - rate() 计算平均每秒的增长率
+	//   # - [5m] 表示看最近 5 分钟
+	//   # - > 0.1 表示每秒超过 0.1 次（即每 10 秒选举一次）
+	//   # - 换算：5 分钟内选举超过 30 次就告警
+	//
+	// Grafana 可视化：
+	//   # 显示每个 LLMService 的累计选举次数
+	//   sum by (namespace, name) (kubeinfer_coordinator_elections_total)
+	//
+	//   # 显示最近 1 小时的选举频率
+	//   rate(kubeinfer_coordinator_elections_total[1h])
+*/
+
+
+metrics.RecordCoordinatorElection(llm.Name, llm.Namespace)
+
 	// ========================================
 	// 步骤3：更新ConfigMap的Data字段
 	// ========================================
