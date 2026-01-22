@@ -8,7 +8,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Moore-Z/kubeinfer/internal/coordinator"
+	"github.com/Moore-Z/kubeinfer/internal/agent/coordinator"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/klog/v2"

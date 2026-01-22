@@ -7,8 +7,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/Moore-Z/kubeinfer/internal/config"
-	"github.com/Moore-Z/kubeinfer/internal/coordinator"
+	"github.com/Moore-Z/kubeinfer/internal/agent/config"
+	"github.com/Moore-Z/kubeinfer/internal/agent/coordinator"
 )
 
 func main() {

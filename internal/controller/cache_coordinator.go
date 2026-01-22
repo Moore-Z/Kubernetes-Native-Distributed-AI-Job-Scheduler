@@ -17,20 +17,21 @@ import (
 	"github.com/Moore-Z/kubeinfer/pkg/metrics"
 )
 
-func (r *LLMServiceReconciler) ensureCacheCoordinator(
-	ctx context.Context,
-	llm *aiv1.LLMService,
-) error {
+func (r *LLMServiceReconciler) ensureCacheCoordinator(ctx context.Context, llm *aiv1.LLMService) error {
 	log := log.FromContext(ctx)
 
+	//查看llm spec 里面的cache strategy 是不是shared
 	if llm.Spec.CacheStrategy != "shared" {
 		return nil
 	}
 	// Configure Map Name (recording model deployment for all pods because pods cannot communicate with each other)
+	// 定义config Map 因为Pod 不能相互交流， 他们得靠 config map 传递信息
 	cmName := llm.Name + "-cache"
 	// Get real config map from k8s library
+	// 把 corev1 的 ConfigMap 的 object 拔出拉锯
 	cm := &corev1.ConfigMap{}
 
+	// 通过 context， 往configMap 里面装， 根据Name， Namespace
 	err := r.Get(ctx, types.NamespacedName{
 		Name:      cmName,
 		Namespace: llm.Namespace,
@@ -40,12 +41,14 @@ func (r *LLMServiceReconciler) ensureCacheCoordinator(
 	if err != nil {
 		if errors.IsNotFound(err) {
 			log.Info("ConfigMap is not found, will create and elect coordinator")
+			// 如果从cm 中提不出来， 创建一个， 这里的llm 就是input parameter， 我们这个request 的， 所有基本信息
 			return r.createCoordinatorConfigMap(ctx, llm)
 		}
 		return err
 	}
 
 	// If Coordinator-prod not exist, we will create one
+	// 去cm 里面找如果没有，我们运行选举逻辑
 	coordinationPodName := cm.Data["coordinator-pod"]
 	if coordinationPodName == "" {
 		log.Info("No coordinator elected, electing now")
@@ -53,6 +56,7 @@ func (r *LLMServiceReconciler) ensureCacheCoordinator(
 	}
 
 	// Create one pod object to take response
+	// 从corev1 里面提object 出来 装数据
 	pod := &corev1.Pod{}
 
 	err = r.Get(ctx, types.NamespacedName{
@@ -60,26 +64,28 @@ func (r *LLMServiceReconciler) ensureCacheCoordinator(
 		Namespace: llm.Namespace,
 	}, pod)
 
-	// If we got error or pod is not ready
+	// Error Handling
 	if err != nil || !r.isPodReady(pod) {
 		log.Info("Coordinator pod not found or not ready, re-electing",
 			"old-coordinator", coordinationPodName)
 
 		return r.electCoordinator(ctx, llm, cm)
 	}
+
+	// 如果没问题， update cm
 	return r.updateCoordinatorHeartbeat(ctx, cm)
 }
 
-func (r *LLMServiceReconciler) createCoordinatorConfigMap(
-	ctx context.Context,
-	llm *aiv1.LLMService,
-) error {
+func (r *LLMServiceReconciler) createCoordinatorConfigMap(ctx context.Context, llm *aiv1.LLMService) error {
 	log := log.FromContext(ctx)
+
+	// 从service Reconcile里面提取出POD list local 的method
 	pods, err := r.getPodsForLLMService(ctx, llm)
 	if err != nil {
 		return err
 	}
 
+	// 找第一ready 的pod
 	var coordinatorPod *corev1.Pod
 	for i := range pods.Items {
 		if r.isPodReady(&pods.Items[i]) {
@@ -87,18 +93,13 @@ func (r *LLMServiceReconciler) createCoordinatorConfigMap(
 			break
 		}
 	}
-	// ========================================
-	// 步骤3：如果没有Ready的Pod，暂时返回
-	// ========================================
-	// Go语法：== nil 检查指针是否为空
+	// Error handle
 	if coordinatorPod == nil {
 		log.Info("No ready Pod yet, will retry later")
 		return nil
 	}
-	// ========================================
-	// 步骤4：构造ConfigMap对象
-	// ========================================
-	// Go语法：&corev1.ConfigMap{...} 创建ConfigMap并返回指针
+
+	// 更具我们选出的POD 来构建 cm
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      llm.Name + "-cache",
@@ -123,10 +124,8 @@ func (r *LLMServiceReconciler) createCoordinatorConfigMap(
 			"last-heartbeat": time.Now().Format(time.RFC3339),
 		},
 	}
-	// ========================================
-	// 步骤5：记录日志
-	// ========================================
-	// Info() 可以接受多个参数，成对出现：key, value, key, value...
+
+	//log 一下
 	log.Info("Creater ConfigMap with coordinator",
 		"configmap", cm.Name,
 		"coordinator", coordinatorPod.Name,
@@ -148,12 +147,8 @@ func (r *LLMServiceReconciler) createCoordinatorConfigMap(
 	return r.Status().Update(ctx, llm)
 }
 
-func (r *LLMServiceReconciler) getPodsForLLMService(
-	ctx context.Context, llm *aiv1.LLMService) (*corev1.PodList, error) {
-	// ========================================
-	// 步骤1：构造Deployment名称
-	// ========================================
-	// 这个名称必须和desiredDeployment()中设置的一致
+func (r *LLMServiceReconciler) getPodsForLLMService(ctx context.Context, llm *aiv1.LLMService) (*corev1.PodList, error) {
+	// 名字提出来
 	deploymentName := llm.Name + "-deployment"
 
 	// 创建一个空的Deployment对象，准备接收查询结果
@@ -166,31 +161,28 @@ func (r *LLMServiceReconciler) getPodsForLLMService(
 	// 如果Deployment不存在或查询失败，返回错误
 	if err != nil {
 		// 1: Deployment 还没创建（正常)
-		// 2: Deployment 被意外删除（异常）
-		// 3: API Server 故障（临时错误）
+
 		if errors.IsNotFound(err) {
 			return &corev1.PodList{}, err
 		}
+		// 2: Deployment 被意外删除（异常）
+		// 3: API Server 故障（临时错误）
 		// Other errors like (timeout, network)
 		return nil, fmt.Errorf("failed to get deployment: %w", err)
 	}
 
-	// ========================================
 	// 步骤2：构造label selector
-	// ========================================
-	// 我们在desiredDeployment()中给Pods打了这些labels
 	labelSelector := map[string]string{
 		"app":    "llm-inference",
 		"llm_cr": llm.Name,
 	}
 
-	// ========================================
-	// 步骤3：查询Pods
-	// ========================================
 	// 创建空的PodList对象
 	podList := &corev1.PodList{}
-	// client.InNamespace() 限制在特定namespace
-	// client.MatchingLabels() 按label筛选
+
+	// list 提取， k8s 就是一个特殊数据库，我们的目的就是构造search schema
+	// InNamespace 有点像 限制库名
+	// labelSelector 有点像 where ....... and .......这两个限制条件
 	err = r.List(
 		ctx, podList,
 		client.InNamespace(llm.Namespace),
@@ -199,10 +191,9 @@ func (r *LLMServiceReconciler) getPodsForLLMService(
 	return podList, err
 }
 
-func (r *LLMServiceReconciler) electCoordinator(
-	ctx context.Context,
-	llm *aiv1.LLMService,						// 要选举 coordinator 的 LLMService
-	cm *corev1.ConfigMap) error {		// 用来存储 coordinator 信息的 ConfigMap
+func (r *LLMServiceReconciler) electCoordinator(ctx context.Context, llm *aiv1.LLMService, cm *corev1.ConfigMap) error {
+	// 要选举 coordinator 的 LLMService
+	// 用来存储 coordinator 信息的 ConfigMap
 	log := log.FromContext(ctx)
 	// ========================================
 	// 步骤1：获取所有Pods
@@ -230,6 +221,7 @@ func (r *LLMServiceReconciler) electCoordinator(
 			// Before() 比较时间戳，判断哪个Pod更早创建
 			if coordinator == nil || pods.Items[i].CreationTimestamp.Before(&coordinator.CreationTimestamp) {
 				coordinator = &pods.Items[i]
+
 			}
 		}
 	}
@@ -238,52 +230,51 @@ func (r *LLMServiceReconciler) electCoordinator(
 		return nil
 	}
 
-/*
-	// ========== Day 4-5 新增：记录选举事件 ==========
+	/*
+		// ========== Day 4-5 新增：记录选举事件 ==========
 
-	// 每次成功选出 Coordinator 时，计数器加 1
-	//
-	// 为什么在这里记录？
-	// - 因为上面已经确认找到了合适的 coordinator
-	// - 马上就要更新 ConfigMap，可以认为选举成功了
-	//
-	// 这个指标的意义（非常重要！）：
-	//
-	// 正常情况：
-	// - 每个 LLMService 启动时选举 1 次
-	// - 之后除非 coordinator Pod 挂了，否则不会再选举
-	// - 所以这个计数器增长非常缓慢
-	//
-	// 异常情况（需要告警）：
-	// - 如果频繁选举（例如每分钟多次）
-	// - 说明 coordinator Pod 不稳定，经常挂掉
-	// - 可能的原因：
-	//   → 资源不足（OOM、CPU throttle）
-	//   → vLLM 进程崩溃
-	//   → 节点不稳定
-	//   → 网络问题导致健康检查失败
-	//
-	// 监控告警配置示例（Prometheus PromQL）：
-	//
-	//   # 检测 5 分钟内选举次数
-	//   rate(kubeinfer_coordinator_elections_total[5m]) > 0.1
-	//
-	//   # 解释：
-	//   # - rate() 计算平均每秒的增长率
-	//   # - [5m] 表示看最近 5 分钟
-	//   # - > 0.1 表示每秒超过 0.1 次（即每 10 秒选举一次）
-	//   # - 换算：5 分钟内选举超过 30 次就告警
-	//
-	// Grafana 可视化：
-	//   # 显示每个 LLMService 的累计选举次数
-	//   sum by (namespace, name) (kubeinfer_coordinator_elections_total)
-	//
-	//   # 显示最近 1 小时的选举频率
-	//   rate(kubeinfer_coordinator_elections_total[1h])
-*/
+		// 每次成功选出 Coordinator 时，计数器加 1
+		//
+		// 为什么在这里记录？
+		// - 因为上面已经确认找到了合适的 coordinator
+		// - 马上就要更新 ConfigMap，可以认为选举成功了
+		//
+		// 这个指标的意义（非常重要！）：
+		//
+		// 正常情况：
+		// - 每个 LLMService 启动时选举 1 次
+		// - 之后除非 coordinator Pod 挂了，否则不会再选举
+		// - 所以这个计数器增长非常缓慢
+		//
+		// 异常情况（需要告警）：
+		// - 如果频繁选举（例如每分钟多次）
+		// - 说明 coordinator Pod 不稳定，经常挂掉
+		// - 可能的原因：
+		//   → 资源不足（OOM、CPU throttle）
+		//   → vLLM 进程崩溃
+		//   → 节点不稳定
+		//   → 网络问题导致健康检查失败
+		//
+		// 监控告警配置示例（Prometheus PromQL）：
+		//
+		//   # 检测 5 分钟内选举次数
+		//   rate(kubeinfer_coordinator_elections_total[5m]) > 0.1
+		//
+		//   # 解释：
+		//   # - rate() 计算平均每秒的增长率
+		//   # - [5m] 表示看最近 5 分钟
+		//   # - > 0.1 表示每秒超过 0.1 次（即每 10 秒选举一次）
+		//   # - 换算：5 分钟内选举超过 30 次就告警
+		//
+		// Grafana 可视化：
+		//   # 显示每个 LLMService 的累计选举次数
+		//   sum by (namespace, name) (kubeinfer_coordinator_elections_total)
+		//
+		//   # 显示最近 1 小时的选举频率
+		//   rate(kubeinfer_coordinator_elections_total[1h])
+	*/
 
-
-metrics.RecordCoordinatorElection(llm.Name, llm.Namespace)
+	metrics.RecordCoordinatorElection(llm.Name, llm.Namespace)
 
 	// ========================================
 	// 步骤3：更新ConfigMap的Data字段
@@ -339,9 +330,7 @@ func (r *LLMServiceReconciler) isPodReady(pod *corev1.Pod) bool {
 	return false
 }
 
-func (r *LLMServiceReconciler) updateCoordinatorHeartbeat(
-	ctx context.Context,
-	cm *corev1.ConfigMap) error {
+func (r *LLMServiceReconciler) updateCoordinatorHeartbeat(ctx context.Context, cm *corev1.ConfigMap) error {
 	cm.Data["last-heartbeat"] = time.Now().Format(time.RFC3339)
 	return r.Update(ctx, cm)
 }
