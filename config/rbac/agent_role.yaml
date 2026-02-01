@@ -1,0 +1,58 @@
+# ============================================================================
+# Agent RBAC 配置
+# ============================================================================
+#
+# Agent 需要以下权限：
+# 1. Lease 操作 - 用于 coordinator 选举
+# 2. Pod 读取 - 用于获取 coordinator 的 IP 地址
+#
+# 使用方式：
+#   kubectl apply -f config/rbac/agent_role.yaml
+#
+# ============================================================================
+
+# ServiceAccount: Agent Pod 使用的身份
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kubeinfer-agent
+  namespace: default  # 改成你的 namespace
+
+---
+# Role: 定义权限
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kubeinfer-agent-role
+  namespace: default  # 改成你的 namespace
+rules:
+  # Lease 操作（选举用）
+  # - get: 读取 lease 查看谁是 coordinator
+  # - list/watch: 监听 lease 变化
+  # - create: 第一个 pod 创建 lease
+  # - update/patch: 续约 lease 或抢占过期的 lease
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+
+  # Pod 读取（获取 Coordinator IP）
+  # Follower 需要知道 Coordinator 的 IP 才能下载模型
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+
+---
+# RoleBinding: 把 Role 绑定到 ServiceAccount
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kubeinfer-agent-rolebinding
+  namespace: default  # 改成你的 namespace
+subjects:
+  - kind: ServiceAccount
+    name: kubeinfer-agent
+    namespace: default  # 改成你的 namespace
+roleRef:
+  kind: Role
+  name: kubeinfer-agent-role
+  apiGroup: rbac.authorization.k8s.io

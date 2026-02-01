@@ -43,17 +43,6 @@ import (
 )
 
 /*
-// LLMServiceReconciler 负责调和(reconcile) LLMService 自定义资源,管理 vLLM 模型服务部署的生命周期。
-// 它实现了 controller-runtime 的 reconciler 接口,监听 LLMService 对象的变化,
-// 并确保集群的实际状态与自定义资源中定义的期望状态一致。
-//
-// 这个 reconciler 负责处理:
-// - 创建和更新 vLLM StatefulSet,使用协调者-跟随者(coordinator-follower)架构
-// - 管理模型下载和 pod 之间的缓存协调
-// - 配置 Service 以便外部访问 vLLM 推理端点
-// - 使用 Kubernetes Lease 对象实现 leader 选举
-// - 暴露 Prometheus 指标以便监控
-//
 // 字段说明:
 // - Client: Kubernetes 客户端,用于与 API server 交互,读写资源
 // - Scheme: 运行时 scheme,包含这个 reconciler 处理的类型信息,
@@ -74,14 +63,13 @@ type LLMServiceReconciler struct {
 //+kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 
-func (r *LLMServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request)(ctrl.Result, error){
+func (r *LLMServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	l := log.FromContext(ctx)
 	startTime := time.Now()
 
-	defer func(){
+	defer func() {
 		duration := time.Since(startTime).Seconds()
-
-		metrics.RecordReconcile("LLMService","completed",duration)
+		metrics.RecordReconcile("LLMService", "completed", duration)
 	}()
 
 	// 1. 从 K8s 集群获取 LLMService 对象
@@ -90,44 +78,39 @@ func (r *LLMServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request)(
 	// - controller-runtime 只告诉我们"某个对象变化了"
 	// - 但不会直接给我们对象的完整数据
 	// - 我们需要主动去 API server 读取最新数据
-	llmService := &aiv1.LLMService{}   // 创建空对象用于接收数据
+	llmService := &aiv1.LLMService{}
+
+	// 去k8s 查一下llmservice 这个资源
 	err := r.Get(ctx, req.NamespacedName, llmService)
+
 	if err != nil {
-		// 如果对象已被删除，返回 nil 表示成功
-		// controller-runtime 会自动停止对这个对象的 wat
+		// 意思是：用户已经把 CR (LLMService) 给删了。
+		// 既然老板把订单都撕了，那我们就没必要干活了。
+		// 直接收工 (return nil)，也不需要报错。
 		if errors.IsNotFound(err) {
 			return ctrl.Result{}, nil
 		}
-		// 其他错误（网络问题、权限问题等）返回 error
-		// controller-runtime 会自动重试
 		return ctrl.Result{}, err
 	}
-		// 2. 根据 LLMService 的配置，生成期望的 Deployment 定义
-	//
-	// desiredDeployment() 是你写的函数，它会：
-	// - 读取 llmService.Spec（用户期望）
-	// - 生成对应的 Deployment YAML
-	// - 包括：镜像、副本数、环境变量等
+	// 定义我们想要什么deployment的format
 	deployment := r.desiredDeployment(llmService)
 
 	// 3. 检查集群中是否已经存在这个 Deployment
-	//
-	// 为什么要检查？
 	// - 如果不存在 → 创建
 	// - 如果存在 → 可能需要更新（这里简化了，没做更新）
 	found := &appsv1.Deployment{}
 	err = r.Get(
 		ctx,
 		types.NamespacedName{
-			Name : deployment.Name,
+			Name:      deployment.Name,
 			Namespace: deployment.Namespace,
 		},
 		found)
 
-		// Error handling
+	// Error handling
 	if err != nil && errors.IsNotFound(err) {
-		// 情况 1：Deployment 不存在 → 创建新的
 
+		// 情况 1：Deployment 不存在 → 创建新的
 		l.Info("Creating a new Deployment",
 			"Deployment.Namespace", deployment.Namespace,
 			"Deployment.Name", deployment.Name)
@@ -151,45 +134,27 @@ func (r *LLMServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request)(
 	}
 
 	/*
-	// 情况 3：Deployment 已存在，found 对象包含了它的最新状态
+		// 情况 3：Deployment 已存在，found 对象包含了它的最新状态
 
-	// 5. 更新 LLMService 的 Status 字段
-	//
-	// Status vs Spec：
-	// - Spec: 用户期望的状态（用户填写的）
-	// - Status: 实际的运行状态（controller 更新的）
-	//
-	// ReadyReplicas：有多少个 Pod 处于 Ready 状态
-	// 用户可以通过 kubectl get llmservice 看到这个数字
+		// 5. 更新 LLMService 的 Status 字段
+		//
+		// Status vs Spec：
+		// - Spec: 用户期望的状态（用户填写的）
+		// - Status: 实际的运行状态（controller 更新的）
+		//
+		// ReadyReplicas：有多少个 Pod 处于 Ready 状态
+		// 用户可以通过 kubectl get llmservice 看到这个数字
 	*/
 	llmService.Status.AvailableReplicas = found.Status.ReadyReplicas
 
 	metrics.LLMServiceReadyReplicas.WithLabelValues(
 		llmService.Name,
-		llmService.Namespace,).Set(float64(found.Status.ReadyReplicas))
+		llmService.Namespace).Set(float64(found.Status.ReadyReplicas))
 
-	// 6. 确保 Cache Coordinator 被选举和维护
-	//
-	// ensureCacheCoordinator() 的职责：
-	// - 检查是否有 coordinator
-	// - 如果没有或者挂了，重新选举
-	// - 更新 ConfigMap 记录 coordinator 信息
-	if err := r.ensureCacheCoordinator(ctx,llmService); err != nil {
-		l.Error(err, "Failed to Ensure cache coordinator")
+	// 注意：Coordinator 选举现在由 Agent 通过 Lease 自己完成
+	// 不再需要 Controller 调用 ensureCacheCoordinator()
 
-		// 特殊错误处理：
-		// - NotFound: ConfigMap 还不存在（第一次运行）
-		// - "no ready pods": 还没有 Ready 的 Pod
-		//
-		// 这两种情况是正常的，只需要等待 2 秒后重试
-		if errors.IsNotFound(err) || err.Error() == "no ready pods available for coordinator election" {
-			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
-		}
-
-		// 其他错误直接返回
-		return ctrl.Result{}, err
-	}
-	// 7. 把 Status 的更新保存到 K8s API server
+	// 6. 把 Status 的更新保存到 K8s API server
 	//
 	// 为什么单独调用 Status().Update()？
 	// - K8s 把 Spec 和 Status 分开管理
@@ -208,61 +173,64 @@ func (r *LLMServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request)(
 	return ctrl.Result{}, nil
 }
 
-// 如果 * 右边是 大写字母开头的类型 (e.g., *Deployment) -> 它是 “指针类型” (名词)。
-// 如果 * 右边是 小写字母的变量名 (e.g., *llm) -> 它是 “取值/解引用” (动词)。
-// 这就是写了一个deployment的 metadata
+// desiredDeployment 生成期望的 Deployment
+//
+// 关键点：
+// 1. 运行真正的 agent（不是 mock_server.py）
+// 2. 添加必要的环境变量（POD_NAME, POD_NAMESPACE, CONFIGMAP_NAME, MODEL_PATH, MODEL_REPO）
+// 3. 挂载模型存储卷
 func (r *LLMServiceReconciler) desiredDeployment(llm *aiv1.LLMService) *appsv1.Deployment {
-
 	replicas := llm.Spec.Replicas
 
-	// 语法点 2: map[key类型]value类型 {...}
-	// 定义一组标签，这是 K8s 里 Pod 和 Service 互相识别的“暗号”
 	labels := map[string]string{
 		"app":    "llm-inference",
-		"llm_cr": llm.Name, // 标记这个 Pod 属于哪个 LLMService
+		"llm_cr": llm.Name,
 	}
 
-	// 语法点 3: &appsv1.Deployment{...}
-	// 相当于 Java: return new Deployment().setMetadata(...).setSpec(...)
-	// 这里直接返回这个对象的“地址”（指针）
-	return &appsv1.Deployment{
+	// ConfigMap 名称（和 cache_coordinator.go 保持一致）
+	configMapName := llm.Name + "-cache"
 
-		// --- 元数据 (Metadata) ---
+	return &appsv1.Deployment{
+		// Meta data “data about data” 数据用来管理数据
 		ObjectMeta: metav1.ObjectMeta{
-			// 名字不能冲突，所以通常用 "CR名-后缀" 的格式
 			Name:      llm.Name + "-deployment",
 			Namespace: llm.Namespace,
 		},
-
-		// --- 规格 (Spec) ---
+		// Pod 的“Desired State”， k8s 会给一个status 目前状态
+		// 外层spec deployment 的部署说明书
 		Spec: appsv1.DeploymentSpec{
-			// 语法点 4: 取地址符 &
-			// K8s 要求 Replicas 必须传指针 (*int32)，而不是值。
-			// 为什么？因为指针可以是 nil（表示没填，用默认值），但 int 只能是 0。
+			// 管几个pod
 			Replicas: &replicas,
-
-			// 选择器：告诉 Deployment "你要管理哪些 Pod"
-			// 这里必须和下面的 Template.Labels 完全一致
+			// “标识识别器” 通过label 找到归它管的pod
 			Selector: &metav1.LabelSelector{
 				MatchLabels: labels,
 			},
-
-			// --- Pod 模板 (Template) ---
-			// 以后扩容出来的每一个 Pod 都长这样
+			// Template 每个pod 的模版 （每个pod 长什么样子）
 			Template: corev1.PodTemplateSpec{
+				// Object Metadata
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: labels, // 给 Pod 打标签
+					Labels: labels,
 				},
+				// 单个Pod 部署说明书
 				Spec: corev1.PodSpec{
-					// 容器数组 (Containers list)
+					// Container 容器列表
 					Containers: []corev1.Container{{
-						Name:  "vllm",
-						Image: llm.Spec.Image,
-						ImagePullPolicy:  corev1.PullIfNotPresent,
+						Name:            "agent",
+						Image:           llm.Spec.Image,
+						ImagePullPolicy: corev1.PullIfNotPresent,
 
-						// Env variable
-						Env : []corev1.EnvVar{
+						// ========================================
+						// 环境变量配置
+						// ========================================
+						// Agent 需要这些环境变量来：
+						// 1. 知道自己是谁（POD_NAME）
+						// 2. 知道在哪个 namespace（POD_NAMESPACE）
+						// 3. 知道去哪里找角色信息（CONFIGMAP_NAME）
+						// 4. 知道模型存哪里（MODEL_PATH）
+						// 5. 知道下载什么模型（MODEL_REPO）
+						Env: []corev1.EnvVar{
 							{
+								// POD_NAME: 通过 Downward API 获取 Pod 名称
 								Name: "POD_NAME",
 								ValueFrom: &corev1.EnvVarSource{
 									FieldRef: &corev1.ObjectFieldSelector{
@@ -270,33 +238,74 @@ func (r *LLMServiceReconciler) desiredDeployment(llm *aiv1.LLMService) *appsv1.D
 									},
 								},
 							},
+							{
+								// POD_NAMESPACE: 通过 Downward API 获取 namespace
+								Name: "POD_NAMESPACE",
+								ValueFrom: &corev1.EnvVarSource{
+									FieldRef: &corev1.ObjectFieldSelector{
+										FieldPath: "metadata.namespace",
+									},
+								},
+							},
+							{
+								// CONFIGMAP_NAME: Agent 读取这个 ConfigMap 来判断角色
+								Name:  "CONFIGMAP_NAME",
+								Value: configMapName,
+							},
+							{
+								// MODEL_PATH: 模型存储路径
+								Name:  "MODEL_PATH",
+								Value: "/models",
+							},
+							{
+								// MODEL_REPO: HuggingFace 模型 ID
+								// Coordinator 用这个来下载模型
+								Name:  "MODEL_REPO",
+								Value: llm.Spec.Model,
+							},
 						},
 
-						Command: []string{
-							"python", "mock_server.py",
+						//端口设置
+						Ports: []corev1.ContainerPort{
+							{
+								// vLLM 推理服务端口
+								Name:          "vllm",
+								ContainerPort: 8000,
+							},
+							{
+								// 模型分发 HTTP 服务端口（Coordinator 用）
+								Name:          "model-server",
+								ContainerPort: 8080,
+							},
 						},
 
-						// 启动命令：把用户的 Model ID 注入进去
-						// 相当于: python3 -m vllm... --model deepseek-ai/deepseek-r1
-						// Command: []string{
-						// 	"python3", "-m", "vllm.entrypoints.openai.api_server",
-						// 	"--model", llm.Spec.Model,
-						// },
-
-						// 端口暴露
-						Ports: []corev1.ContainerPort{{
-							ContainerPort: 8000,
-							Name:          "http",
-						}},
-
-						// 资源限制 (Resources)
-						// Resources: corev1.ResourceRequirements{
-						// 	Limits: corev1.ResourceList{
-						// 		// 内存限制：暂时写死 2Gi，后面我们会改成动态的
-						// 		corev1.ResourceMemory: resource.MustParse("2Gi"),
-						// 	},
-						// },
+						// 数据的（Persistence & Decoupling）， 我们的volume 该插在哪里
+						VolumeMounts: []corev1.VolumeMount{
+							{
+								Name:      "model-storage",
+								MountPath: "/models",
+							},
+						},
 					}},
+
+					// Declare volume 外挂 模型存储， 目前是EmptyDir（空硬盘）
+					Volumes: []corev1.Volume{
+						{
+							// EmptyDir: Pod 生命周期内的临时存储
+							// 生产环境应该用 PVC （pesistent volumn claim） 永久硬盘
+							// Dev 环境可以用零时存储 （Pod 重启后数据会丢失）
+							Name: "model-storage",
+							VolumeSource: corev1.VolumeSource{
+								EmptyDir: &corev1.EmptyDirVolumeSource{},
+							},
+						},
+					},
+
+					// ========================================
+					// ServiceAccount
+					// ========================================
+					// Agent 需要权限读取 ConfigMap 和 Pod 信息
+					ServiceAccountName: "kubeinfer-agent",
 				},
 			},
 		},

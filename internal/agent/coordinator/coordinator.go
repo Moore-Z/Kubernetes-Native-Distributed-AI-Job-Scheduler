@@ -6,17 +6,19 @@ import (
 	"log"
 	"os"
 	"os/exec"
+
+	"github.com/Moore-Z/kubeinfer/internal/agent/vllm"
 )
 
-type Coordinator struct{
-	modelPath string
+type Coordinator struct {
+	modelPath   string
 	modelServer *ModelServer
 }
 
 // NewCoordinator 创建新的 Coordinator
-func NewCoordinator(modelPath string) *Coordinator{
+func NewCoordinator(modelPath string) *Coordinator {
 	return &Coordinator{
-		modelPath: modelPath,
+		modelPath:   modelPath,
 		modelServer: NewModelServer(modelPath),
 	}
 }
@@ -28,27 +30,37 @@ func NewCoordinator(modelPath string) *Coordinator{
 // 3. 等待关闭信号
 func (c *Coordinator) Run(ctx context.Context) error {
 	log.Println("🚀 Running as Coordinator")
+
+	// 很强的模型查找（有没有？如果没有下载）
 	if err := c.ensureModel(); err != nil {
 		return fmt.Errorf("failed to ensure model: %w", err)
 	}
 	// Step 2: 启动 HTTP 服务器（在 goroutine 中运行，不阻塞）
-	go func ()  {
+	go func() {
 		if err := c.modelServer.Start(); err != nil {
 			log.Fatalf("❌ Model server failed: %v", err)
 		}
 	}()
 
+	// vllm 启动
+	vllmConfig := vllm.LoadConfigFromEnv(c.modelPath)
+	vllmServer := vllm.NewServer(vllmConfig)
+	if err := vllmServer.Start(); err != nil {
+		return fmt.Errorf("failed to start vLLM: %w", err)
+	}
+
+	// 整个server 全部close
 	<-ctx.Done()
+	vllmServer.Stop()
+
 	log.Println("🛑 Coordinator shutting down")
 	return nil
 }
 
-
-
 // ensureModel 确保模型存在
 // 如果模型已存在，跳过下载；否则下载
-func (c *Coordinator)ensureModel() error{
-	if c.modelExists(c.modelPath){
+func (c *Coordinator) ensureModel() error {
+	if c.modelExists(c.modelPath) {
 		log.Println("✅ Model already exists, skipping download")
 		return nil
 	}
@@ -59,20 +71,20 @@ func (c *Coordinator)ensureModel() error{
 
 // modelExists 检查模型目录是否有文件
 // os : read path
-func (c *Coordinator) modelExists(modelPath string) bool{
+func (c *Coordinator) modelExists(modelPath string) bool {
 	files, err := os.ReadDir(modelPath)
-	if err != nil{
+	if err != nil {
 		return false
 	}
 	return len(files) > 0
 }
 
 // downloadModel 从 HuggingFace 下载模型
-func (c *Coordinator) downloadModel() error{
+func (c *Coordinator) downloadModel() error {
 	// 从环境变量获取模型仓库名称
 	modelRepo := os.Getenv("MODEL_REPO")
 
-	if modelRepo == ""{
+	if modelRepo == "" {
 		return fmt.Errorf("MODEL_REPO environment variable not set")
 	}
 
